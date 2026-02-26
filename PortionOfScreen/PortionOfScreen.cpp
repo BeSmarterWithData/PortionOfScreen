@@ -367,5 +367,5 @@ void SaveSettings()
     key.SetDwordValue(L"Top", defaultWindowPos.top);
     key.SetDwordValue(L"Right", defaultWindowPos.right);
     key.SetDwordValue(L"Bottom", defaultWindowPos.bottom);
-    key.SetDwordValue(L"FocusMode", (DWORD) focusMode);
+    key.SetDwordValue(L"FocusMode", (DWORD) false);
 }
