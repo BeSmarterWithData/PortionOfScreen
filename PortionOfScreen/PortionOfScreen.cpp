@@ -14,6 +14,8 @@
 #define IDC_OPTIONS    1100
 #define POS_MIN_WIDTH  320
 #define POS_MIN_HEIGHT 200
+#define REDRAW_INTERVAL_MS 33
+#define FOCUS_SWITCH_DELAY_MS 100
 
 // Global Variables:
 HINSTANCE hInst;                                // current instance
@@ -21,7 +23,7 @@ WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 bool moveToDefaultWindowPos = false;
 HWND newFocusHwnd;
-unsigned int focusTime;
+unsigned int focusTimeMs;
 
 // Global settings
 bool focusMode =  false;
@@ -140,7 +142,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), 128, LWA_ALPHA);
    UpdateWindow(hWnd);
 
-   SetTimer(hWnd, IDT_REDRAW, 200, (TIMERPROC)NULL);
+    SetTimer(hWnd, IDT_REDRAW, REDRAW_INTERVAL_MS, (TIMERPROC)NULL);
 
    return TRUE;
 }
@@ -217,17 +219,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     if (newFocusHwnd != hwndForeground)
                     {
                         newFocusHwnd = hwndForeground;
-                        focusTime = 0;
+                        focusTimeMs = 0;
                     }
                     else
-                        ++focusTime;
+                        focusTimeMs += REDRAW_INTERVAL_MS;
 
-                    if (focusTime < 3)
+                    if (focusTimeMs < FOCUS_SWITCH_DELAY_MS)
                         break;
 
 #ifdef AUTO_REMOVE_CAPTION
                     // Remove PoS caption after one minute. Can't do it earlier because you can't select WS_POPUP windows when sharing a window.
-                    if (focusTime > 300)
+                    if (focusTimeMs > 60000)
                         SetWindowLong(hWnd, GWL_STYLE, WS_VISIBLE | WS_DISABLED | WS_POPUP);
 #endif
 
@@ -247,28 +249,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
             }
             
-            InvalidateRect(hWnd, NULL, TRUE);
+            InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
 
     case WM_ERASEBKGND:
-        break;
+        return 1;
 
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
-        RECT rect;
-        GetWindowRect(hWnd, &rect);
+        RECT rectClient;
+        GetClientRect(hWnd, &rectClient);
 
-        HWND hwndDesktop = GetDesktopWindow();
-        HDC hdcDesktop = GetWindowDC(hwndDesktop);
+        HDC hdcDesktop = GetDC(NULL);
         POINT clientPoint = { 0, 0 };
         ClientToScreen(hWnd, &clientPoint);
 
-        BitBlt(hdc, 0, 0, rect.right - rect.left + 1, rect.bottom - rect.top + 1, hdcDesktop, clientPoint.x, clientPoint.y, SRCCOPY);
+        BitBlt(
+            hdc,
+            0,
+            0,
+            rectClient.right - rectClient.left,
+            rectClient.bottom - rectClient.top,
+            hdcDesktop,
+            clientPoint.x,
+            clientPoint.y,
+            SRCCOPY | CAPTUREBLT);
 
-        ReleaseDC(hwndDesktop, hdcDesktop);
+        ReleaseDC(NULL, hdcDesktop);
         EndPaint(hWnd, &ps);
     }
     break;
