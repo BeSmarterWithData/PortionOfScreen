@@ -3,7 +3,8 @@
 
 #include "framework.h"
 #include "PortionOfScreen.h"
-#include "WinReg.hpp"
+#include <ShlObj.h>
+#include <strsafe.h>
 
 // Auto remove PoS caption by setting the WS_POPUP style in focused mode after one minute.
 // However, WS_POPUP windows can't be shared, so you have to share within one minute after de-activating PoS.
@@ -348,34 +349,56 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     return (INT_PTR)FALSE;
 }
 
+// Returns the path to the settings INI file in %APPDATA%\PortionOfScreen\settings.ini
+static BOOL GetSettingsPath(WCHAR* path, DWORD cchPath)
+{
+    WCHAR appData[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData)))
+        return FALSE;
+
+    StringCchPrintfW(path, cchPath, L"%s\\PortionOfScreen", appData);
+    CreateDirectoryW(path, NULL);
+    StringCchPrintfW(path, cchPath, L"%s\\PortionOfScreen\\settings.ini", appData);
+    return TRUE;
+}
+
 void LoadSettings()
 {
-    try
+    WCHAR iniPath[MAX_PATH];
+    if (!GetSettingsPath(iniPath, MAX_PATH) ||
+        GetPrivateProfileIntW(L"Window", L"Left", -1, iniPath) == -1)
     {
-        winreg::RegKey key{ HKEY_CURRENT_USER, L"SOFTWARE\\PortionOfScreen" };
-        defaultWindowPos.left = key.GetDwordValue(L"Left");
-        defaultWindowPos.top = key.GetDwordValue(L"Top");
-        defaultWindowPos.right = key.GetDwordValue(L"Right");
-        defaultWindowPos.bottom = key.GetDwordValue(L"Bottom");
-        winreg::RegExpected<DWORD> focusExpected = key.TryGetDwordValue(L"FocusMode");
-        focusMode = focusExpected.IsValid() ? (bool) focusExpected.GetValue() : true;
-    }
-    catch(...)
-    {
+        // No settings file or first run - use defaults
         defaultWindowPos.left = 100;
         defaultWindowPos.top = 100;
         defaultWindowPos.right = 900;
         defaultWindowPos.bottom = 700;
         focusMode = true;
+        return;
     }
+
+    defaultWindowPos.left   = GetPrivateProfileIntW(L"Window", L"Left",   100, iniPath);
+    defaultWindowPos.top    = GetPrivateProfileIntW(L"Window", L"Top",    100, iniPath);
+    defaultWindowPos.right  = GetPrivateProfileIntW(L"Window", L"Right",  900, iniPath);
+    defaultWindowPos.bottom = GetPrivateProfileIntW(L"Window", L"Bottom", 700, iniPath);
+    focusMode = GetPrivateProfileIntW(L"Settings", L"FocusMode", 1, iniPath) != 0;
 }
 
 void SaveSettings()
 {
-    winreg::RegKey key{ HKEY_CURRENT_USER, L"SOFTWARE\\PortionOfScreen" };
-    key.SetDwordValue(L"Left", defaultWindowPos.left);
-    key.SetDwordValue(L"Top", defaultWindowPos.top);
-    key.SetDwordValue(L"Right", defaultWindowPos.right);
-    key.SetDwordValue(L"Bottom", defaultWindowPos.bottom);
-    key.SetDwordValue(L"FocusMode", (DWORD) focusMode);
+    WCHAR iniPath[MAX_PATH];
+    if (!GetSettingsPath(iniPath, MAX_PATH))
+        return;
+
+    WCHAR buf[32];
+    StringCchPrintfW(buf, 32, L"%d", defaultWindowPos.left);
+    WritePrivateProfileStringW(L"Window", L"Left", buf, iniPath);
+    StringCchPrintfW(buf, 32, L"%d", defaultWindowPos.top);
+    WritePrivateProfileStringW(L"Window", L"Top", buf, iniPath);
+    StringCchPrintfW(buf, 32, L"%d", defaultWindowPos.right);
+    WritePrivateProfileStringW(L"Window", L"Right", buf, iniPath);
+    StringCchPrintfW(buf, 32, L"%d", defaultWindowPos.bottom);
+    WritePrivateProfileStringW(L"Window", L"Bottom", buf, iniPath);
+    StringCchPrintfW(buf, 32, L"%d", focusMode ? 1 : 0);
+    WritePrivateProfileStringW(L"Settings", L"FocusMode", buf, iniPath);
 }
