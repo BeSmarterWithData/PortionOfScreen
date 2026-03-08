@@ -26,7 +26,7 @@ HWND newFocusHwnd;
 unsigned int focusTimeMs;
 
 // Global settings
-bool focusMode =  false;
+bool focusMode =  true;
 RECT defaultWindowPos;
 
 // Forward declarations of functions included in this code module:
@@ -358,7 +358,7 @@ void LoadSettings()
         defaultWindowPos.right = key.GetDwordValue(L"Right");
         defaultWindowPos.bottom = key.GetDwordValue(L"Bottom");
         winreg::RegExpected<DWORD> focusExpected = key.TryGetDwordValue(L"FocusMode");
-        focusMode = focusExpected.IsValid() ? (bool) focusExpected.GetValue() : false;
+        focusMode = focusExpected.IsValid() ? (bool) focusExpected.GetValue() : true;
     }
     catch(...)
     {
@@ -366,7 +366,7 @@ void LoadSettings()
         defaultWindowPos.top = 100;
         defaultWindowPos.right = 900;
         defaultWindowPos.bottom = 700;
-        focusMode = false;
+        focusMode = true;
     }
 }
 
@@ -377,5 +377,5 @@ void SaveSettings()
     key.SetDwordValue(L"Top", defaultWindowPos.top);
     key.SetDwordValue(L"Right", defaultWindowPos.right);
     key.SetDwordValue(L"Bottom", defaultWindowPos.bottom);
-    key.SetDwordValue(L"FocusMode", (DWORD) false);
+    key.SetDwordValue(L"FocusMode", (DWORD) focusMode);
 }
