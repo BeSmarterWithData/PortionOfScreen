@@ -10,7 +10,7 @@ set "REPO_OWNER=BeSmarterWithData"
 set "REPO_NAME=PortionOfScreen"
 set "BRANCH=main"
 set "EXE_NAME=PortionOfScreen.exe"
-set "EXE_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%BRANCH%/bin/%EXE_NAME%"
+set "EXE_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%BRANCH%/dist/%EXE_NAME%"
 
 REM Install to user-local directory (no admin rights needed)
 set "INSTALL_DIR=%LOCALAPPDATA%\PortionOfScreen"
