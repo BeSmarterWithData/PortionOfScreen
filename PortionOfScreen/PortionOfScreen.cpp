@@ -5,6 +5,7 @@
 #include "PortionOfScreen.h"
 #include <ShlObj.h>
 #include <strsafe.h>
+#include <process.h>
 
 // Auto remove PoS caption by setting the WS_POPUP style in focused mode after one minute.
 // However, WS_POPUP windows can't be shared, so you have to share within one minute after de-activating PoS.
@@ -26,6 +27,23 @@ bool moveToDefaultWindowPos = false;
 HWND newFocusHwnd;
 unsigned int focusTimeMs;
 
+// Persistent off-screen buffer (shared between UI and capture thread)
+HDC hdcOffscreen = NULL;
+HBITMAP hbmOffscreen = NULL;
+HBITMAP hbmOldOffscreen = NULL;
+int offscreenWidth = 0;
+int offscreenHeight = 0;
+
+// Background capture thread state
+CRITICAL_SECTION csBitmap;          // protects the off-screen buffer
+HANDLE hCaptureThread = NULL;
+volatile bool captureRunning = false;
+volatile int captureX = 0;
+volatile int captureY = 0;
+volatile int captureW = 0;
+volatile int captureH = 0;
+HWND hMainWnd = NULL;
+
 // Global settings
 bool focusMode =  true;
 RECT defaultWindowPos;
@@ -37,6 +55,69 @@ LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 void                LoadSettings();
 void                SaveSettings();
+unsigned __stdcall  CaptureThreadProc(void* param);
+
+// Background thread that performs desktop capture so the UI thread
+// never stalls on GetDC(NULL)/BitBlt which can block DWM compositing.
+unsigned __stdcall CaptureThreadProc(void* /*param*/)
+{
+    HDC hdcCapture = NULL;
+    HBITMAP hbmCapture = NULL;
+    HBITMAP hbmOldCapture = NULL;
+    int allocW = 0, allocH = 0;
+
+    while (captureRunning)
+    {
+        int w = captureW;
+        int h = captureH;
+        int x = captureX;
+        int y = captureY;
+
+        if (w > 0 && h > 0)
+        {
+            // (Re)allocate thread-local capture buffer if size changed
+            if (w != allocW || h != allocH || !hdcCapture)
+            {
+                if (hdcCapture)
+                {
+                    SelectObject(hdcCapture, hbmOldCapture);
+                    DeleteObject(hbmCapture);
+                    DeleteDC(hdcCapture);
+                }
+                HDC hdcScreen = GetDC(NULL);
+                hdcCapture = CreateCompatibleDC(hdcScreen);
+                hbmCapture = CreateCompatibleBitmap(hdcScreen, w, h);
+                hbmOldCapture = (HBITMAP)SelectObject(hdcCapture, hbmCapture);
+                ReleaseDC(NULL, hdcScreen);
+                allocW = w;
+                allocH = h;
+            }
+
+            // Capture desktop into thread-local buffer (the slow/blocking call)
+            HDC hdcDesktop = GetDC(NULL);
+            BitBlt(hdcCapture, 0, 0, w, h, hdcDesktop, x, y, SRCCOPY);
+            ReleaseDC(NULL, hdcDesktop);
+
+            // Copy into shared buffer under lock (fast memory-to-memory blit)
+            EnterCriticalSection(&csBitmap);
+            if (offscreenWidth == w && offscreenHeight == h && hdcOffscreen)
+            {
+                BitBlt(hdcOffscreen, 0, 0, w, h, hdcCapture, 0, 0, SRCCOPY);
+            }
+            LeaveCriticalSection(&csBitmap);
+        }
+
+        Sleep(REDRAW_INTERVAL_MS);
+    }
+
+    if (hdcCapture)
+    {
+        SelectObject(hdcCapture, hbmOldCapture);
+        DeleteObject(hbmCapture);
+        DeleteDC(hdcCapture);
+    }
+    return 0;
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -139,11 +220,20 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    AppendMenu(hSysMenu, MF_SEPARATOR, 0, NULL);
    AppendMenu(hSysMenu, MF_STRING, IDC_OPTIONS, L"Options");
 
+   // Init critical section before ShowWindow/UpdateWindow which trigger
+   // WM_PAINT that enters the critical section.
+   hMainWnd = hWnd;
+   InitializeCriticalSection(&csBitmap);
+
    ShowWindow(hWnd, nCmdShow);
    SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), 128, LWA_ALPHA);
    UpdateWindow(hWnd);
 
     SetTimer(hWnd, IDT_REDRAW, REDRAW_INTERVAL_MS, (TIMERPROC)NULL);
+
+   // Start the background capture thread
+   captureRunning = true;
+   hCaptureThread = (HANDLE)_beginthreadex(NULL, 0, CaptureThreadProc, NULL, 0, NULL);
 
    return TRUE;
 }
@@ -245,7 +335,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         rectPoS.right != rectForeground.right ||
                         rectPoS.bottom != rectForeground.bottom)
                     {
-                        SetWindowPos(hWnd, HWND_TOPMOST, rectForeground.left, rectForeground.top, rectForeground.right - rectForeground.left, rectForeground.bottom - rectForeground.top, SWP_NOACTIVATE);
+                        SetWindowPos(hWnd, HWND_TOPMOST, rectForeground.left, rectForeground.top, rectForeground.right - rectForeground.left, rectForeground.bottom - rectForeground.top, SWP_NOACTIVATE | SWP_NOREDRAW);
                     }
                 }
             }
@@ -263,23 +353,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rectClient;
         GetClientRect(hWnd, &rectClient);
+        int cw = rectClient.right - rectClient.left;
+        int ch = rectClient.bottom - rectClient.top;
 
-        HDC hdcDesktop = GetDC(NULL);
+        // Recreate the shared off-screen buffer when the window size changes.
+        EnterCriticalSection(&csBitmap);
+        if (cw != offscreenWidth || ch != offscreenHeight || !hdcOffscreen)
+        {
+            if (hdcOffscreen)
+            {
+                SelectObject(hdcOffscreen, hbmOldOffscreen);
+                DeleteObject(hbmOffscreen);
+                DeleteDC(hdcOffscreen);
+            }
+            hdcOffscreen = CreateCompatibleDC(hdc);
+            hbmOffscreen = CreateCompatibleBitmap(hdc, cw, ch);
+            hbmOldOffscreen = (HBITMAP)SelectObject(hdcOffscreen, hbmOffscreen);
+            offscreenWidth = cw;
+            offscreenHeight = ch;
+        }
+
+        // Fast blit from the pre-captured buffer (no desktop capture on UI thread)
+        BitBlt(hdc, 0, 0, cw, ch, hdcOffscreen, 0, 0, SRCCOPY);
+        LeaveCriticalSection(&csBitmap);
+
+        // Update capture coordinates for the background thread
         POINT clientPoint = { 0, 0 };
         ClientToScreen(hWnd, &clientPoint);
+        captureX = clientPoint.x;
+        captureY = clientPoint.y;
+        captureW = cw;
+        captureH = ch;
 
-        BitBlt(
-            hdc,
-            0,
-            0,
-            rectClient.right - rectClient.left,
-            rectClient.bottom - rectClient.top,
-            hdcDesktop,
-            clientPoint.x,
-            clientPoint.y,
-            SRCCOPY | CAPTUREBLT);
-
-        ReleaseDC(NULL, hdcDesktop);
         EndPaint(hWnd, &ps);
     }
     break;
@@ -301,6 +406,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     break;
 
     case WM_DESTROY:
+        // Stop the capture thread
+        captureRunning = false;
+        if (hCaptureThread)
+        {
+            WaitForSingleObject(hCaptureThread, 2000);
+            CloseHandle(hCaptureThread);
+            hCaptureThread = NULL;
+        }
+        if (hdcOffscreen)
+        {
+            SelectObject(hdcOffscreen, hbmOldOffscreen);
+            DeleteObject(hbmOffscreen);
+            DeleteDC(hdcOffscreen);
+            hdcOffscreen = NULL;
+        }
+        DeleteCriticalSection(&csBitmap);
         SaveSettings();
         PostQuitMessage(0);
         break;
